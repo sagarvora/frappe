@@ -123,6 +123,9 @@ class MariaDBConnectionUtil:
 			"host": self.host,
 			"user": self.user,
 			"password": self.password,
+			"converter": {
+				FIELD_TYPE.NEWDECIMAL: float,
+			}
 			# "conv": self.CONVERSION_MAP,
 			# "charset": "utf8mb4",
 			# "use_unicode": True,
