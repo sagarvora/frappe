@@ -1034,7 +1034,7 @@ class TestSqlIterator(FrappeTestCase):
 				msg=f"{query=} results not same as iterator",
 			)
 
-	@run_only_if(db_type_is.MARIADB)
-	def test_unbuffered_cursor(self):
-		with frappe.db.unbuffered_cursor():
-			self.test_db_sql_iterator()
+	# @run_only_if(db_type_is.MARIADB)
+	# def test_unbuffered_cursor(self):
+	# 	with frappe.db.unbuffered_cursor():
+	# 		self.test_db_sql_iterator()

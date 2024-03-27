@@ -257,7 +257,7 @@ def remove_all(dt, dn, from_delete=False, delete_permanently=False):
 					delete_permanently=delete_permanently,
 				)
 	except Exception as e:
-		if e.args[0] != 1054:
+		if hasattr(e, "errno") and e.errno != 1054:
 			raise  # (temp till for patched)
 
 

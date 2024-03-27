@@ -1,4 +1,5 @@
-from pymysql.constants.ER import DUP_ENTRY
+# from pymysql.constants.ER import DUP_ENTRY
+from mariadb.constants.ERR import ER_DUP_ENTRY as DUP_ENTRY
 
 import frappe
 from frappe import _
@@ -129,7 +130,7 @@ class MariaDBTable(DBTable):
 			if query := locals().get("query"):  # this weirdness is to avoid potentially unbounded vars
 				print(f"Failed to alter schema using query: {query}")
 
-			if e.args[0] == DUP_ENTRY:
+			if e.errno == DUP_ENTRY:
 				fieldname = str(e).split("'")[-2]
 				frappe.throw(
 					_(

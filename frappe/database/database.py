@@ -34,10 +34,12 @@ from frappe.utils import cast as cast_fieldtype
 from frappe.utils.deprecations import deprecation_warning
 
 if TYPE_CHECKING:
+	# from pymysql.connections import Connection as MariadbConnection
+	# from pymysql.cursors import Cursor as MariadbCursor
+	from mariadb.connections import Connection as MariadbConnection
+	from mariadb.cursors import Cursor as MariadbCursor
 	from psycopg2 import connection as PostgresConnection
 	from psycopg2 import cursor as PostgresCursor
-	from pymysql.connections import Connection as MariadbConnection
-	from pymysql.cursors import Cursor as MariadbCursor
 
 IFNULL_PATTERN = re.compile(r"ifnull\(", flags=re.IGNORECASE)
 INDEX_PATTERN = re.compile(r"\s*\([^)]+\)\s*")

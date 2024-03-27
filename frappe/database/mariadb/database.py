@@ -1,8 +1,12 @@
 import re
 from contextlib import contextmanager
 
-import pymysql
-from pymysql.constants import ER, FIELD_TYPE
+import mariadb as pymysql
+from mariadb.constants import ERR as ER
+from mariadb.constants import FIELD_TYPE
+
+# import pymysql
+# from pymysql.constants import ER, FIELD_TYPE
 from pymysql.converters import conversions, escape_string
 
 import frappe
@@ -27,19 +31,19 @@ class MariaDBExceptionUtil:
 
 	@staticmethod
 	def is_deadlocked(e: pymysql.Error) -> bool:
-		return e.args[0] == ER.LOCK_DEADLOCK
+		return e.errno == ER.ER_LOCK_DEADLOCK
 
 	@staticmethod
 	def is_timedout(e: pymysql.Error) -> bool:
-		return e.args[0] == ER.LOCK_WAIT_TIMEOUT
+		return e.errno == ER.ER_LOCK_WAIT_TIMEOUT
 
 	@staticmethod
 	def is_read_only_mode_error(e: pymysql.Error) -> bool:
-		return e.args[0] == 1792
+		return e.errno == 1792
 
 	@staticmethod
 	def is_table_missing(e: pymysql.Error) -> bool:
-		return e.args[0] == ER.NO_SUCH_TABLE
+		return e.errno == ER.ER_NO_SUCH_TABLE
 
 	@staticmethod
 	def is_missing_table(e: pymysql.Error) -> bool:
@@ -47,45 +51,45 @@ class MariaDBExceptionUtil:
 
 	@staticmethod
 	def is_missing_column(e: pymysql.Error) -> bool:
-		return e.args[0] == ER.BAD_FIELD_ERROR
+		return e.errno == ER.ER_BAD_FIELD_ERROR
 
 	@staticmethod
 	def is_duplicate_fieldname(e: pymysql.Error) -> bool:
-		return e.args[0] == ER.DUP_FIELDNAME
+		return e.errno == ER.ER_DUP_FIELDNAME
 
 	@staticmethod
 	def is_duplicate_entry(e: pymysql.Error) -> bool:
-		return e.args[0] == ER.DUP_ENTRY
+		return e.errno == ER.ER_DUP_ENTRY
 
 	@staticmethod
 	def is_access_denied(e: pymysql.Error) -> bool:
-		return e.args[0] == ER.ACCESS_DENIED_ERROR
+		return e.errno == ER.ER_ACCESS_DENIED_ERROR
 
 	@staticmethod
 	def cant_drop_field_or_key(e: pymysql.Error) -> bool:
-		return e.args[0] == ER.CANT_DROP_FIELD_OR_KEY
+		return e.errno == ER.ER_CANT_DROP_FIELD_OR_KEY
 
 	@staticmethod
 	def is_syntax_error(e: pymysql.Error) -> bool:
-		return e.args[0] == ER.PARSE_ERROR
+		return e.errno == ER.ER_PARSE_ERROR
 
 	@staticmethod
 	def is_statement_timeout(e: pymysql.Error) -> bool:
-		return e.args[0] == 1969
+		return e.errno == 1969
 
 	@staticmethod
 	def is_data_too_long(e: pymysql.Error) -> bool:
-		return e.args[0] == ER.DATA_TOO_LONG
+		return e.errno == ER.ER_DATA_TOO_LONG
 
 	@staticmethod
 	def is_db_table_size_limit(e: pymysql.Error) -> bool:
-		return e.args[0] == ER.TOO_BIG_ROWSIZE
+		return e.errno == ER.ER_TOO_BIG_ROWSIZE
 
 	@staticmethod
 	def is_primary_key_violation(e: pymysql.Error) -> bool:
 		return (
 			MariaDBDatabase.is_duplicate_entry(e)
-			and "PRIMARY" in cstr(e.args[1])
+			and "PRIMARY" in cstr(e.errmsg)
 			and isinstance(e, pymysql.IntegrityError)
 		)
 
@@ -93,7 +97,7 @@ class MariaDBExceptionUtil:
 	def is_unique_key_violation(e: pymysql.Error) -> bool:
 		return (
 			MariaDBDatabase.is_duplicate_entry(e)
-			and "Duplicate" in cstr(e.args[1])
+			and "Duplicate" in cstr(e.errmsg)
 			and isinstance(e, pymysql.IntegrityError)
 		)
 
@@ -119,9 +123,9 @@ class MariaDBConnectionUtil:
 			"host": self.host,
 			"user": self.user,
 			"password": self.password,
-			"conv": self.CONVERSION_MAP,
-			"charset": "utf8mb4",
-			"use_unicode": True,
+			# "conv": self.CONVERSION_MAP,
+			# "charset": "utf8mb4",
+			# "use_unicode": True,
 		}
 
 		if self.cur_db_name:
@@ -144,11 +148,11 @@ class MariaDBConnectionUtil:
 
 class MariaDBDatabase(MariaDBConnectionUtil, MariaDBExceptionUtil, Database):
 	REGEX_CHARACTER = "regexp"
-	CONVERSION_MAP = conversions | {
-		FIELD_TYPE.NEWDECIMAL: float,
-		FIELD_TYPE.DATETIME: get_datetime,
-		UnicodeWithAttrs: escape_string,
-	}
+	# CONVERSION_MAP = conversions | {
+	# 	FIELD_TYPE.NEWDECIMAL: float,
+	# 	FIELD_TYPE.DATETIME: get_datetime,
+	# 	UnicodeWithAttrs: escape_string,
+	# }
 	default_port = "3306"
 	MAX_ROW_SIZE_LIMIT = 65_535  # bytes
 
@@ -206,9 +210,10 @@ class MariaDBDatabase(MariaDBConnectionUtil, MariaDBExceptionUtil, Database):
 		return db_size[0].get("database_size")
 
 	def log_query(self, query, values, debug, explain):
-		self.last_query = self._cursor._executed
-		self._log_query(self.last_query, debug, explain, query)
-		return self.last_query
+		pass
+		# self.last_query = self._cursor._executed
+		# self._log_query(self.last_query, debug, explain, query)
+		# return self.last_query
 
 	def _clean_up(self):
 		# PERF: Erase internal references of pymysql to trigger GC as soon as
@@ -225,7 +230,8 @@ class MariaDBDatabase(MariaDBConnectionUtil, MariaDBExceptionUtil, Database):
 		# of this method should be limited.
 
 		# pymysql expects unicode argument to escape_string with Python 3
-		s = frappe.as_unicode(escape_string(frappe.as_unicode(s)), "utf-8").replace("`", "\\`")
+		escape_str = getattr(frappe.local.db._conn, "escape_string", escape_string)
+		s = frappe.as_unicode(escape_str(frappe.as_unicode(s)), "utf-8").replace("`", "\\`")
 
 		# NOTE separating % escape, because % escape should only be done when using LIKE operator
 		# or when you use python format string to generate query that already has a %s
@@ -517,14 +523,14 @@ class MariaDBDatabase(MariaDBConnectionUtil, MariaDBExceptionUtil, Database):
 		if est_row_size:
 			return int(est_row_size[0][0])
 
-	@contextmanager
-	def unbuffered_cursor(self):
-		from pymysql.cursors import SSCursor
+	# @contextmanager
+	# def unbuffered_cursor(self):
+	# 	from pymysql.cursors import SSCursor
 
-		try:
-			original_cursor = self._cursor
-			new_cursor = self._cursor = self._conn.cursor(SSCursor)
-			yield
-		finally:
-			self._cursor = original_cursor
-			new_cursor.close()
+	# 	try:
+	# 		original_cursor = self._cursor
+	# 		new_cursor = self._cursor = self._conn.cursor(SSCursor)
+	# 		yield
+	# 	finally:
+	# 		self._cursor = original_cursor
+	# 		new_cursor.close()

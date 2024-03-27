@@ -77,7 +77,7 @@ def get_notifications_for_doctypes(config, notification_count):
 				except Exception as e:
 					# OperationalError: (1412, 'Table definition has changed, please retry transaction')
 					# InternalError: (1684, 'Table definition is being modified by concurrent DDL statement')
-					if e.args and e.args[0] not in (1412, 1684):
+					if hasattr(e, "errno") and e.errno not in (1412, 1684):
 						raise
 
 				else:
@@ -123,7 +123,7 @@ def get_notifications_for_targets(config, notification_percent):
 					frappe.clear_messages()
 					pass
 				except Exception as e:
-					if e.args[0] not in (1412, 1684):
+					if hasattr(e, "errno") and e.errno not in (1412, 1684):
 						raise
 
 				else:
