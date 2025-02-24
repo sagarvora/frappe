@@ -151,7 +151,7 @@ def is_single_doctype(doctype: str) -> bool:
 		return getattr(frappe.get_meta(doctype), "issingle", False)
 
 
-def simple_singledispatch(func):
+def simple_singledispatch(is_method=False):
 	"""
 	A decorator that implements a simplified version of single dispatch.
 
@@ -193,26 +193,32 @@ def simple_singledispatch(func):
 	    func("hello")  # Outputs: Implementation for str: hello
 	    func([1, 2, 3])  # Outputs: Base implementation for <class 'list'>
 	"""
-	registry = {}
 
-	def dispatch(arg):
-		for cls in arg.__class__.__mro__:
-			if cls in registry:
-				return registry[cls]
-		return func
+	def decorator(func):
+		registry = {}
 
-	def register(type_):
-		def decorator(f):
-			registry[type_] = f
-			return f
+		def dispatch(arg):
+			for cls in arg.__class__.__mro__:
+				if cls in registry:
+					return registry[cls]
+			return func
 
-		return decorator
+		def register(type_):
+			def decorator(f):
+				registry[type_] = f
+				return f
 
-	@wraps(func)
-	def wrapper(*args, **kw):
-		if not args:
-			return func(*args, **kw)
-		return dispatch(args[0])(*args, **kw)
+			return decorator
 
-	wrapper.register = register
-	return wrapper
+		arg_to_check = 1 if is_method else 0
+
+		@wraps(func)
+		def wrapper(*args, **kw):
+			if not args:
+				return func(*args, **kw)
+			return dispatch(args[arg_to_check])(*args, **kw)
+
+		wrapper.register = register
+		return wrapper
+
+	return decorator

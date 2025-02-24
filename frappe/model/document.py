@@ -38,7 +38,7 @@ DOCUMENT_LOCK_EXPIRTY = 12 * 60 * 60  # All locks expire in 12 hours automatical
 DOCUMENT_LOCK_SOFT_EXPIRY = 60 * 60  # Let users force-unlock after 60 minutes
 
 
-@simple_singledispatch
+@simple_singledispatch()
 def get_doc(*args, **kwargs) -> "Document":
 	"""Return a `frappe.model.Document` object.
 
@@ -193,7 +193,7 @@ class Document(BaseDocument, DocRef):
 		if kwargs:  # ad-hoc overrides
 			self._init_from_kwargs(kwargs)
 
-	@singledispatchmethod
+	@simple_singledispatch(is_method=True)
 	def _init_dispatch(self, arg, *args, **kwargs):
 		raise ValueError(f"Unsupported argument type: {type(arg)}")
 
