@@ -20,3 +20,7 @@ pypika.terms.Function = ParameterizedFunction
 pypika.queries.Selectable.__getattr__ = ignore_copy(lambda table, x: Field(x, table=table))
 pypika.queries.Selectable.__getitem__ = ignore_copy(lambda table, x: Field(x, table=table))
 pypika.queries.Selectable.field = pypika.terms.PseudoColumn("field")
+
+# run monkey patches
+patch_query_execute()
+patch_query_aggregation()
