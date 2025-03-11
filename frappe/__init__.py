@@ -21,6 +21,8 @@ import threading
 import warnings
 from collections import defaultdict
 from collections.abc import Callable, Iterable
+from contextvars import ContextVar
+from functools import partial
 from typing import (
 	TYPE_CHECKING,
 	Any,
@@ -74,8 +76,39 @@ if TYPE_CHECKING:  # pragma: no cover
 	from frappe.types.lazytranslatedstring import _LazyTranslate
 	from frappe.utils.redis_wrapper import ClientCache, RedisWrapper
 
+
+_local_contextvar = ContextVar("frappe_local")
+
+
+class FrappeLocal(Local):
+	__slots__ = ()
+
+	def __init__(self):
+		super().__init__(_local_contextvar)
+
+	def __getattribute__(self, name):
+		if name[0] == "_":
+			return object.__getattribute__(self, name)
+
+		obj = _local_contextvar.get(None)
+		if obj is not None and name in obj:
+			return obj[name]
+
+		return object.__getattribute__(self, name)
+
+
+class FrappeLocalProxy(LocalProxy):
+	__slots__ = ()
+
+	def __getattribute__(self, name):
+		if name[0] == "_":
+			return object.__getattribute__(self, name)
+
+		return getattr(object.__getattribute__(self, "_get_current_object")(), name)
+
+
 controllers: dict[str, "Document"] = {}
-local = Local()
+local = FrappeLocal()
 cache: Optional["RedisWrapper"] = None
 client_cache: Optional["ClientCache"] = None
 STANDARD_USERS = ("Guest", "Administrator")
@@ -90,8 +123,6 @@ if _dev_server:
 def _get_local_proxy(self: Local, name: str) -> LocalProxy:
 	"""Get local proxy object by name."""
 
-	_local_contextvar = self._Local__storage
-
 	def _get_current_object() -> Any:
 		obj = _local_contextvar.get(None)
 
@@ -100,7 +131,7 @@ def _get_local_proxy(self: Local, name: str) -> LocalProxy:
 
 		raise RuntimeError("object is not bound") from None
 
-	lp = LocalProxy(_get_current_object)
+	lp = FrappeLocalProxy(_get_current_object)
 	object.__setattr__(lp, "_get_current_object", _get_current_object)
 	return lp
 
