@@ -69,6 +69,10 @@ UNPICKLABLE_KEYS = (
 	"_table_fieldnames",
 )
 
+RESERVED_KEYWORDS = frozenset(
+	("doctype", "flags", "_doc_before_save", "dont_update_if_missing", *UNPICKLABLE_KEYS)
+)
+
 
 def get_controller(doctype):
 	"""Return the locally cached **class** object of the given DocType.
@@ -128,22 +132,6 @@ def import_controller(doctype):
 		raise ImportError(f"{doctype}: {classname} is not a subclass of BaseDocument")
 
 	return class_
-
-
-RESERVED_KEYWORDS = frozenset(
-	(
-		"doctype",
-		"meta",
-		"flags",
-		"_weakref",
-		"_parent_doc",
-		"_table_fields",
-		"_doc_before_save",
-		"_table_fieldnames",
-		"permitted_fieldnames",
-		"dont_update_if_missing",
-	)
-)
 
 
 class BaseDocument:
