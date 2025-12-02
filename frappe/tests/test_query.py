@@ -986,6 +986,265 @@ class TestQuery(IntegrationTestCase):
 		test_user.remove_roles(test_role)
 		frappe.delete_doc("Role", test_role, force=True)
 
+	def test_child_table_field_permlevel_on_parent(self):
+		"""Test that accessing child table respects the child table field's permlevel on parent."""
+		parent_dt_name = "ParentDocForChildPerm"
+		child_dt_name = "ChildDocForChildPerm"
+		test_role = "ChildPermTestRole"
+		test_user = "test2@example.com"
+
+		# Cleanup
+		frappe.set_user("Administrator")
+		frappe.delete_doc("DocType", parent_dt_name, ignore_missing=True, force=True)
+		frappe.delete_doc("DocType", child_dt_name, ignore_missing=True, force=True)
+		frappe.delete_doc("Role", test_role, ignore_missing=True, force=True)
+		test_user_doc = frappe.get_doc("User", test_user)
+		test_user_doc.remove_roles(test_role)
+
+		# Create child doctype first
+		child_dt = new_doctype(
+			child_dt_name,
+			istable=1,
+			fields=[
+				{"fieldname": "child_data", "fieldtype": "Data", "label": "Child Data"},
+			],
+		).insert(ignore_if_duplicate=True)
+
+		# Create parent with child table field at permlevel 1
+		parent_dt = new_doctype(
+			parent_dt_name,
+			fields=[
+				{"fieldname": "parent_data", "fieldtype": "Data", "label": "Parent Data"},
+				{
+					"fieldname": "restricted_children",
+					"fieldtype": "Table",
+					"options": child_dt_name,
+					"permlevel": 1,
+					"label": "Restricted Children",
+				},
+			],
+		).insert(ignore_if_duplicate=True)
+
+		# Create record
+		parent_doc = frappe.get_doc(
+			doctype=parent_dt_name,
+			parent_data="Test Parent",
+			restricted_children=[{"child_data": "Secret Child Data"}],
+		).insert(ignore_permissions=True)
+
+		# Setup role with read but no permlevel 1
+		frappe.get_doc({"doctype": "Role", "role_name": test_role}).insert(ignore_if_duplicate=True)
+		add_permission(parent_dt_name, test_role, 0, ptype="read")
+		add_permission(child_dt_name, test_role, 0, ptype="read")
+		update_permission_property(parent_dt_name, test_role, 1, "read", 0, validate=False)
+		test_user_doc.add_roles(test_role)
+
+		# Test as restricted user - child table field should be filtered out
+		frappe.set_user(test_user)
+		result = frappe.qb.get_query(
+			parent_dt_name,
+			filters={"name": parent_doc.name},
+			fields=["name", "parent_data", "restricted_children.child_data"],
+			ignore_permissions=False,
+		).run(as_dict=True)
+
+		self.assertEqual(len(result), 1)
+		self.assertIn("parent_data", result[0])
+		self.assertNotIn(
+			"child_data",
+			result[0],
+			"Child table field should NOT be accessible when table field is at restricted permlevel",
+		)
+
+		# Test as Administrator - should have access
+		frappe.set_user("Administrator")
+		result_admin = frappe.qb.get_query(
+			parent_dt_name,
+			filters={"name": parent_doc.name},
+			fields=["name", "parent_data", "restricted_children.child_data"],
+			ignore_permissions=False,
+		).run(as_dict=True)
+
+		self.assertEqual(len(result_admin), 1)
+		self.assertIn("child_data", result_admin[0])
+		self.assertEqual(result_admin[0]["child_data"], "Secret Child Data")
+
+		# Cleanup
+		frappe.set_user("Administrator")
+		parent_doc.delete(ignore_permissions=True)
+		parent_dt.delete()
+		child_dt.delete()
+		test_user_doc.remove_roles(test_role)
+		frappe.delete_doc("Role", test_role, force=True)
+
+	def test_link_field_permlevel_on_parent(self):
+		"""Test that accessing link_field.target respects the link field's permlevel on parent."""
+		target_dt_name = "TargetDocForLinkFieldPerm"
+		source_dt_name = "SourceDocForLinkFieldPerm"
+		test_role = "LinkFieldPermTestRole"
+		test_user = "test2@example.com"
+
+		# Cleanup
+		frappe.set_user("Administrator")
+		frappe.delete_doc("DocType", target_dt_name, ignore_missing=True, force=True)
+		frappe.delete_doc("DocType", source_dt_name, ignore_missing=True, force=True)
+		frappe.delete_doc("Role", test_role, ignore_missing=True, force=True)
+		test_user_doc = frappe.get_doc("User", test_user)
+		test_user_doc.remove_roles(test_role)
+
+		# Create target doctype
+		target_dt = new_doctype(
+			target_dt_name,
+			fields=[
+				{"fieldname": "target_data", "fieldtype": "Data", "label": "Target Data"},
+			],
+		).insert(ignore_if_duplicate=True)
+
+		# Create source with link field at permlevel 1
+		source_dt = new_doctype(
+			source_dt_name,
+			fields=[
+				{"fieldname": "source_data", "fieldtype": "Data", "label": "Source Data"},
+				{
+					"fieldname": "restricted_link",
+					"fieldtype": "Link",
+					"options": target_dt_name,
+					"permlevel": 1,
+					"label": "Restricted Link",
+				},
+			],
+		).insert(ignore_if_duplicate=True)
+
+		# Create records
+		target_doc = frappe.get_doc(doctype=target_dt_name, target_data="Linked Data").insert(
+			ignore_permissions=True
+		)
+		source_doc = frappe.get_doc(
+			doctype=source_dt_name, source_data="Source Data", restricted_link=target_doc.name
+		).insert(ignore_permissions=True)
+
+		# Setup role with read but no permlevel 1
+		frappe.get_doc({"doctype": "Role", "role_name": test_role}).insert(ignore_if_duplicate=True)
+		add_permission(source_dt_name, test_role, 0, ptype="read")
+		add_permission(target_dt_name, test_role, 0, ptype="read")
+		update_permission_property(source_dt_name, test_role, 1, "read", 0, validate=False)
+		test_user_doc.add_roles(test_role)
+
+		# Test as restricted user - link field access should be denied
+		frappe.set_user(test_user)
+		result = frappe.qb.get_query(
+			source_dt_name,
+			filters={"name": source_doc.name},
+			fields=["name", "source_data", "restricted_link.target_data as linked_data"],
+			ignore_permissions=False,
+		).run(as_dict=True)
+
+		self.assertEqual(len(result), 1)
+		self.assertIn("source_data", result[0])
+		self.assertNotIn(
+			"linked_data",
+			result[0],
+			"Link field access should NOT be allowed when link field is at restricted permlevel",
+		)
+
+		# Test as Administrator
+		frappe.set_user("Administrator")
+		result_admin = frappe.qb.get_query(
+			source_dt_name,
+			filters={"name": source_doc.name},
+			fields=["name", "source_data", "restricted_link.target_data as linked_data"],
+			ignore_permissions=False,
+		).run(as_dict=True)
+
+		self.assertEqual(len(result_admin), 1)
+		self.assertIn("linked_data", result_admin[0])
+		self.assertEqual(result_admin[0]["linked_data"], "Linked Data")
+
+		# Cleanup
+		frappe.set_user("Administrator")
+		source_doc.delete(ignore_permissions=True)
+		target_doc.delete(ignore_permissions=True)
+		source_dt.delete()
+		target_dt.delete()
+		test_user_doc.remove_roles(test_role)
+		frappe.delete_doc("Role", test_role, force=True)
+
+	def test_link_field_target_doctype_permission(self):
+		"""Test that accessing link_field.target requires permission on target doctype."""
+		target_dt_name = "TargetDocNoAccess"
+		source_dt_name = "SourceDocWithLink"
+		test_role = "LinkTargetPermTestRole"
+		test_user = "test2@example.com"
+
+		# Cleanup
+		frappe.set_user("Administrator")
+		frappe.delete_doc("DocType", target_dt_name, ignore_missing=True, force=True)
+		frappe.delete_doc("DocType", source_dt_name, ignore_missing=True, force=True)
+		frappe.delete_doc("Role", test_role, ignore_missing=True, force=True)
+		test_user_doc = frappe.get_doc("User", test_user)
+		test_user_doc.remove_roles(test_role)
+
+		# Create doctypes
+		target_dt = new_doctype(
+			target_dt_name,
+			fields=[
+				{"fieldname": "secret_data", "fieldtype": "Data", "label": "Secret Data"},
+			],
+		).insert(ignore_if_duplicate=True)
+
+		source_dt = new_doctype(
+			source_dt_name,
+			fields=[
+				{"fieldname": "source_data", "fieldtype": "Data", "label": "Source Data"},
+				{
+					"fieldname": "link_to_secret",
+					"fieldtype": "Link",
+					"options": target_dt_name,
+					"label": "Link to Secret",
+				},
+			],
+		).insert(ignore_if_duplicate=True)
+
+		# Create records
+		target_doc = frappe.get_doc(doctype=target_dt_name, secret_data="Top Secret").insert(
+			ignore_permissions=True
+		)
+		source_doc = frappe.get_doc(
+			doctype=source_dt_name, source_data="Public", link_to_secret=target_doc.name
+		).insert(ignore_permissions=True)
+
+		# Setup role - read on source but NO permission on target
+		frappe.get_doc({"doctype": "Role", "role_name": test_role}).insert(ignore_if_duplicate=True)
+		add_permission(source_dt_name, test_role, 0, ptype="read")
+		# Explicitly no permission on target doctype
+		test_user_doc.add_roles(test_role)
+
+		# Test as restricted user - should not be able to access linked data
+		frappe.set_user(test_user)
+		result = frappe.qb.get_query(
+			source_dt_name,
+			filters={"name": source_doc.name},
+			fields=["name", "source_data", "link_to_secret.secret_data as secret"],
+			ignore_permissions=False,
+		).run(as_dict=True)
+
+		self.assertEqual(len(result), 1)
+		self.assertIn("source_data", result[0])
+		self.assertNotIn(
+			"secret",
+			result[0],
+			"Link field target should NOT be accessible without permission on target doctype",
+		)
+
+		# Cleanup
+		frappe.set_user("Administrator")
+		source_doc.delete(ignore_permissions=True)
+		target_doc.delete(ignore_permissions=True)
+		source_dt.delete()
+		target_dt.delete()
+		test_user_doc.remove_roles(test_role)
+		frappe.delete_doc("Role", test_role, force=True)
+
 	def test_nested_permission(self):
 		"""Test permission on nested doctypes"""
 		frappe.set_user("Administrator")

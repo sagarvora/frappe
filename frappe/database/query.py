@@ -685,16 +685,9 @@ class Engine:
 		# Handle dot notation (link_field.target_field or child_table_field.target_field)
 		if "." in field:
 			# Disallow tabDoc.field notation in filters.
-			dynamic_field = DynamicTableField.parse(field, self.doctype, allow_tab_notation=False)
+			dynamic_field = DynamicTableField.parse(field, self, allow_tab_notation=False)
 			if dynamic_field:
-				# Parsed successfully as link/child field access
-				target_doctype = dynamic_field.doctype
-				target_fieldname = dynamic_field.fieldname
-				parent_doctype_for_perm = (
-					dynamic_field.parent_doctype if isinstance(dynamic_field, ChildTableField) else None
-				)
-				self._check_field_permission(target_doctype, target_fieldname, parent_doctype_for_perm)
-
+				dynamic_field.check_permissions()
 				self.query = dynamic_field.apply_join(self.query)
 				# Return the pypika Field object associated with the dynamic field
 				return dynamic_field.field
@@ -745,15 +738,14 @@ class Engine:
 				# Create a ChildTableField instance to handle join and field access
 				# Pass the identified parent_fieldname
 				child_field_handler = ChildTableField(
+					self,
 					doctype=doctype,
 					fieldname=target_fieldname,
 					parent_doctype=self.doctype,
 					parent_fieldname=parent_fieldname,
 				)
 
-				# For permission check, the parent is the main doctype
-				parent_doctype_for_perm = self.doctype
-				self._check_field_permission(target_doctype, target_fieldname, parent_doctype_for_perm)
+				child_field_handler.check_permissions()
 
 				# Delegate join logic
 				self.query = child_field_handler.apply_join(self.query)
@@ -787,15 +779,13 @@ class Engine:
 						if child_meta.has_field(target_fieldname):
 							# Found in child table, create handler for it
 							child_field_handler = ChildTableField(
+								self,
 								doctype=df.options,
 								fieldname=target_fieldname,
 								parent_doctype=self.doctype,
 								parent_fieldname=df.fieldname,
 							)
-							parent_doctype_for_perm = self.doctype
-							self._check_field_permission(
-								df.options, target_fieldname, parent_doctype_for_perm
-							)
+							child_field_handler.check_permissions()
 							self.query = child_field_handler.apply_join(self.query)
 							return child_field_handler.field
 
@@ -975,7 +965,9 @@ class Engine:
 						frappe.throw(
 							_("Child query fields for '{0}' must be a list or tuple.").format(child_field)
 						)
-					_parsed_fields.append(ChildQuery(child_field, list(child_fields_list), self.doctype))
+					_parsed_fields.append(
+						ChildQuery(self, child_field, list(child_fields_list), self.doctype)
+					)
 				# Return list as a dict entry might represent multiple child queries (though unlikely)
 				return _parsed_fields
 
@@ -984,7 +976,7 @@ class Engine:
 			frappe.throw(_("Invalid field type: {0}").format(type(field)))
 
 		# Try parsing as dynamic field (link/child table access)
-		if parsed := DynamicTableField.parse(field, self.doctype):
+		if parsed := DynamicTableField.parse(field, self):
 			return parsed
 		# Otherwise, parse as a standard field (simple, quoted, table-qualified, with/without alias)
 		else:
@@ -1074,21 +1066,11 @@ class Engine:
 			)
 
 		# Try parsing as dynamic field (link_field.field or child_table.field)
-		dynamic_field = DynamicTableField.parse(field_name, self.doctype, allow_tab_notation=False)
+		dynamic_field = DynamicTableField.parse(field_name, self, allow_tab_notation=False)
 		if dynamic_field:
-			# Check permissions for dynamic field
 			if self.apply_permissions:
-				if isinstance(dynamic_field, ChildTableField):
-					self._check_field_permission(
-						dynamic_field.doctype, dynamic_field.fieldname, dynamic_field.parent_doctype
-					)
-				elif isinstance(dynamic_field, LinkTableField):
-					# Check permission for the link field in parent doctype
-					self._check_field_permission(self.doctype, dynamic_field.link_fieldname)
-					# Check permission for the target field in linked doctype
-					self._check_field_permission(dynamic_field.doctype, dynamic_field.fieldname)
+				dynamic_field.check_permissions()
 
-			# Apply join for the dynamic field
 			self.query = dynamic_field.apply_join(self.query)
 			return dynamic_field.field
 		else:
@@ -1164,15 +1146,12 @@ class Engine:
 	def check_read_permission(self):
 		"""Check if user has read permission on the doctype"""
 
-		def has_permission(ptype):
-			return frappe.has_permission(
-				self.doctype,
-				ptype,
-				user=self.user,
-				parent_doctype=self.parent_doctype,
-			)
-
-		if not has_permission("select") and not has_permission("read"):
+		if not frappe.has_permission(
+			self.doctype,
+			self.get_permission_type(self.doctype),
+			user=self.user,
+			parent_doctype=self.parent_doctype,
+		):
 			frappe.throw(
 				_("Insufficient Permission for {0}").format(frappe.bold(self.doctype)),
 				frappe.PermissionError,
@@ -1188,48 +1167,14 @@ class Engine:
 		)
 
 		for field in self.fields:
-			if isinstance(field, ChildTableField):
-				if parent_permission_type == "select":
-					# Skip child table fields if parent permission is only 'select'
-					continue
-
-				# Cache permitted fields for child doctypes if accessed multiple times
-				permitted_child_fields_set = self._get_cached_permitted_fields(
-					field.doctype, field.parent_doctype, self.get_permission_type(field.doctype)
-				)
-				# Check permission for the specific field in the child table
-				if field.fieldname in permitted_child_fields_set:
+			if isinstance(field, DynamicTableField):
+				if field.check_permissions(throw=False):
 					allowed_fields.append(field)
-			elif isinstance(field, LinkTableField):
-				# Check permission for the link field *in the parent doctype*
-				if field.link_fieldname in permitted_fields_set:
-					# Also check if user has permission to read/select the target doctype
-					target_doctype = field.doctype
-					has_target_perm = frappe.has_permission(
-						target_doctype, "select", user=self.user
-					) or frappe.has_permission(target_doctype, "read", user=self.user)
-
-					if has_target_perm:
-						# Finally, check if the specific field *in the target doctype* is permitted
-						permitted_target_fields_set = self._get_cached_permitted_fields(
-							target_doctype, None, self.get_permission_type(target_doctype)
-						)
-						if field.fieldname in permitted_target_fields_set:
-							allowed_fields.append(field)
 			elif isinstance(field, ChildQuery):
-				if parent_permission_type == "select":
-					# Skip child queries if parent permission is only 'select'
-					continue
-
-				# Cache permitted fields for the child doctype of the query
-				permitted_child_fields_set = self._get_cached_permitted_fields(
-					field.doctype, field.parent_doctype, self.get_permission_type(field.doctype)
-				)
-				# Filter the fields *within* the ChildQuery object based on permissions
-				field.fields = [f for f in field.fields if f in permitted_child_fields_set]
-				# Only add the child query if it still has fields after filtering
-				if field.fields:
-					allowed_fields.append(field)
+				if field.check_permissions(throw=False):
+					field.filter_fields_by_permission()
+					if field.fields:
+						allowed_fields.append(field)
 			elif isinstance(field, Field):
 				if field.name == "*":
 					# Expand '*' to include all permitted fields
@@ -1513,11 +1458,13 @@ class Engine:
 class DynamicTableField:
 	def __init__(
 		self,
+		engine: "Engine",
 		doctype: str,
 		fieldname: str,
 		parent_doctype: str,
 		alias: str | None = None,
 	) -> None:
+		self.engine = engine
 		self.doctype = doctype
 		self.fieldname = fieldname
 		self.alias = alias
@@ -1532,8 +1479,20 @@ class DynamicTableField:
 		alias = f"AS {self.alias}" if self.alias else ""
 		return f"{table_name}.{fieldname} {alias}".strip()
 
+	def check_permissions(self, *, throw: bool = True) -> bool:
+		"""Check if user has permission to access this field.
+
+		Args:
+			throw: If True, raises PermissionError on denial. If False, returns False.
+
+		Returns:
+			True if permitted, False if denied (only when throw=False)
+		"""
+		raise NotImplementedError
+
 	@staticmethod
-	def parse(field: str, doctype: str, allow_tab_notation: bool = True):
+	def parse(field: str, engine: "Engine", allow_tab_notation: bool = True):
+		doctype = engine.doctype
 		if "." in field:
 			alias = None
 			# Handle 'as' alias, case-insensitive, taking the last occurrence
@@ -1558,7 +1517,7 @@ class DynamicTableField:
 					return None
 				# Found a child table reference like tabChildDoc.child_field
 				# Note: parent_fieldname is None here as it's directly specified via tab notation
-				return ChildTableField(child_doctype_name, child_field, doctype, alias=alias)
+				return ChildTableField(engine, child_doctype_name, child_field, doctype, alias=alias)
 			else:
 				# Try parsing as LinkTableField (link_field.target_field) or ChildTableField (child_field.target_field)
 				# This handles patterns not starting with 'tab' prefix
@@ -1593,12 +1552,22 @@ class DynamicTableField:
 					if linked_field.fieldtype == "Link":
 						# It's a Link field access: parent_doctype.link_fieldname.target_fieldname
 						return LinkTableField(
-							linked_doctype, target_fieldname, doctype, potential_parent_fieldname, alias=alias
+							engine,
+							linked_doctype,
+							target_fieldname,
+							doctype,
+							potential_parent_fieldname,
+							alias=alias,
 						)
 					elif linked_field.fieldtype in frappe.model.table_fields:
 						# It's a Child Table field access: parent_doctype.child_table_fieldname.target_fieldname
 						return ChildTableField(
-							linked_doctype, target_fieldname, doctype, potential_parent_fieldname, alias=alias
+							engine,
+							linked_doctype,
+							target_fieldname,
+							doctype,
+							potential_parent_fieldname,
+							alias=alias,
 						)
 
 		return None
@@ -1610,19 +1579,69 @@ class DynamicTableField:
 class ChildTableField(DynamicTableField):
 	def __init__(
 		self,
+		engine: "Engine",
 		doctype: str,
 		fieldname: str,
 		parent_doctype: str,
 		parent_fieldname: str | None = None,
 		alias: str | None = None,
 	) -> None:
-		self.doctype = doctype
-		self.fieldname = fieldname
-		self.alias = alias
-		self.parent_doctype = parent_doctype
+		super().__init__(engine, doctype, fieldname, parent_doctype, alias=alias)
 		self.parent_fieldname = parent_fieldname
 		self.table = frappe.qb.DocType(self.doctype)
 		self.field = self.table[self.fieldname]
+
+	def check_permissions(self, *, throw: bool = True) -> bool:
+		"""Check permissions for child table field access.
+
+		Checks:
+		1. Parent doctype must have "read" permission (not just "select")
+		2. Child table fieldname must be permitted on parent (permlevel)
+		3. Target field must be permitted on child doctype (permlevel)
+		"""
+		if not self.engine.apply_permissions:
+			return True
+
+		def deny(msg: str) -> bool:
+			if throw:
+				frappe.throw(msg, frappe.PermissionError, title=_("Permission Error"))
+			return False
+
+		# Child tables inherit parent's permission type
+		parent_perm_type = self.engine.get_permission_type(self.engine.doctype)
+
+		# 1. Check parent has "read" permission (child data requires more than "select")
+		if parent_perm_type == "select":
+			return deny(
+				_("Cannot access child table {0}: insufficient permission on {1}").format(
+					frappe.bold(self.doctype), frappe.bold(self.engine.doctype)
+				)
+			)
+
+		# 2. Check child table fieldname is permitted on parent doctype
+		if self.parent_fieldname:
+			parent_permitted_fields = self.engine._get_cached_permitted_fields(
+				self.engine.doctype, self.engine.parent_doctype, parent_perm_type
+			)
+			if self.parent_fieldname not in parent_permitted_fields:
+				return deny(
+					_("You do not have permission to access field: {0}").format(
+						frappe.bold(f"{self.engine.doctype}.{self.parent_fieldname}")
+					)
+				)
+
+		# 3. Check target field is permitted on child doctype (uses parent's perm type)
+		child_permitted_fields = self.engine._get_cached_permitted_fields(
+			self.doctype, self.parent_doctype, parent_perm_type
+		)
+		if self.fieldname not in child_permitted_fields:
+			return deny(
+				_("You do not have permission to access field: {0}").format(
+					frappe.bold(f"{self.doctype}.{self.fieldname}")
+				)
+			)
+
+		return True
 
 	def apply_select(self, query: QueryBuilder) -> QueryBuilder:
 		table = frappe.qb.DocType(self.doctype)
@@ -1644,16 +1663,66 @@ class ChildTableField(DynamicTableField):
 class LinkTableField(DynamicTableField):
 	def __init__(
 		self,
+		engine: "Engine",
 		doctype: str,
 		fieldname: str,
 		parent_doctype: str,
 		link_fieldname: str,
 		alias: str | None = None,
 	) -> None:
-		super().__init__(doctype, fieldname, parent_doctype, alias=alias)
+		super().__init__(engine, doctype, fieldname, parent_doctype, alias=alias)
 		self.link_fieldname = link_fieldname
 		self.table = frappe.qb.DocType(self.doctype)
 		self.field = self.table[self.fieldname]
+
+	def check_permissions(self, *, throw: bool = True) -> bool:
+		"""Check permissions for link field access.
+
+		Checks:
+		1. Link fieldname must be permitted on parent doctype (permlevel)
+		2. User must have read/select permission on linked doctype
+		3. Target field must be permitted on linked doctype (permlevel)
+		"""
+		if not self.engine.apply_permissions:
+			return True
+
+		def deny(msg: str) -> bool:
+			if throw:
+				frappe.throw(msg, frappe.PermissionError, title=_("Permission Error"))
+			return False
+
+		# 1. Check link fieldname is permitted on parent doctype
+		parent_permitted_fields = self.engine._get_cached_permitted_fields(
+			self.engine.doctype,
+			self.engine.parent_doctype,
+			self.engine.get_permission_type(self.engine.doctype),
+		)
+		if self.link_fieldname not in parent_permitted_fields:
+			return deny(
+				_("You do not have permission to access field: {0}").format(
+					frappe.bold(f"{self.engine.doctype}.{self.link_fieldname}")
+				)
+			)
+
+		target_perm_type = self.engine.get_permission_type(self.doctype)
+
+		# 2. Check user has read/select permission on linked doctype
+		has_target_perm = frappe.has_permission(self.doctype, target_perm_type, user=self.engine.user)
+		if not has_target_perm:
+			return deny(_("You do not have permission to access {0}").format(frappe.bold(self.doctype)))
+
+		# 3. Check target field is permitted on linked doctype
+		target_permitted_fields = self.engine._get_cached_permitted_fields(
+			self.doctype, None, target_perm_type
+		)
+		if self.fieldname not in target_permitted_fields and self.fieldname not in OPTIONAL_FIELDS:
+			return deny(
+				_("You do not have permission to access field: {0}").format(
+					frappe.bold(f"{self.doctype}.{self.fieldname}")
+				)
+			)
+
+		return True
 
 	def apply_select(self, query: QueryBuilder) -> QueryBuilder:
 		table = frappe.qb.DocType(self.doctype)
@@ -1671,10 +1740,12 @@ class LinkTableField(DynamicTableField):
 class ChildQuery:
 	def __init__(
 		self,
+		engine: "Engine",
 		fieldname: str,
 		fields: list,
 		parent_doctype: str,
 	) -> None:
+		self.engine = engine
 		field = frappe.get_meta(parent_doctype).get_field(fieldname)
 		if field.fieldtype not in frappe.model.table_fields:
 			return
@@ -1682,6 +1753,60 @@ class ChildQuery:
 		self.fields = fields
 		self.parent_doctype = parent_doctype
 		self.doctype = field.options
+
+	def check_permissions(self, *, throw: bool = True) -> bool:
+		"""Check permissions for child query access.
+
+		Checks:
+		1. Parent doctype must have "read" permission (not just "select")
+		2. Child table fieldname must be permitted on parent (permlevel)
+
+		Note: Individual field permissions within the child query are filtered
+		separately in apply_field_permissions.
+		"""
+		if not self.engine.apply_permissions:
+			return True
+
+		def deny(msg: str) -> bool:
+			if throw:
+				frappe.throw(msg, frappe.PermissionError, title=_("Permission Error"))
+			return False
+
+		# Child tables inherit parent's permission type
+		parent_perm_type = self.engine.get_permission_type(self.engine.doctype)
+
+		# 1. Check parent has "read" permission (child data requires more than "select")
+		if parent_perm_type == "select":
+			return deny(
+				_("Cannot access child table {0}: insufficient permission on {1}").format(
+					frappe.bold(self.doctype), frappe.bold(self.engine.doctype)
+				)
+			)
+
+		# 2. Check child table fieldname is permitted on parent doctype
+		parent_permitted_fields = self.engine._get_cached_permitted_fields(
+			self.engine.doctype, self.engine.parent_doctype, parent_perm_type
+		)
+		if self.fieldname not in parent_permitted_fields:
+			return deny(
+				_("You do not have permission to access field: {0}").format(
+					frappe.bold(f"{self.engine.doctype}.{self.fieldname}")
+				)
+			)
+
+		return True
+
+	def filter_fields_by_permission(self) -> None:
+		"""Filter self.fields to only include permitted fields."""
+		if not self.engine.apply_permissions:
+			return
+
+		# Child tables inherit parent's permission type
+		parent_perm_type = self.engine.get_permission_type(self.engine.doctype)
+		permitted_fields = self.engine._get_cached_permitted_fields(
+			self.doctype, self.parent_doctype, parent_perm_type
+		)
+		self.fields = [f for f in self.fields if f in permitted_fields]
 
 	def get_query(self, parent_names=None) -> QueryBuilder:
 		filters = {
