@@ -922,6 +922,23 @@ class Engine:
 			)
 		return self.permitted_fields_cache[cache_key]
 
+	def _get_permitted_parentfields(self) -> list[str]:
+		"""Get list of child table fieldnames the user has permission to access.
+
+		Returns fieldnames of Table/Table MultiSelect fields in the parent doctype
+		that link to self.doctype and are in the user's permitted fields.
+		"""
+		parent_meta = frappe.get_meta(self.parent_doctype)
+		permission_type = self.get_permission_type(self.parent_doctype)
+		permitted_fields = self._get_cached_permitted_fields(self.parent_doctype, None, permission_type)
+
+		permitted_parentfields = []
+		for df in parent_meta.get_table_fields():
+			if df.options == self.doctype and df.fieldname in permitted_fields:
+				permitted_parentfields.append(df.fieldname)
+
+		return permitted_parentfields
+
 	def parse_string_field(self, field: str):
 		"""
 		Parses a field string into a pypika Field object.
@@ -1401,6 +1418,8 @@ class Engine:
 			- permissions are checked against the parent doctype
 			- a join to the parent table is added
 			- conditions reference the parent table's fields
+			- parenttype must match the specified parent_doctype
+			- parentfield must be a permitted child table field
 		"""
 
 		if not self.apply_permissions:
@@ -1408,8 +1427,14 @@ class Engine:
 
 		# For child tables, join to parent table so permission conditions can reference it
 		if self.permission_doctype != self.doctype:
+			permitted_parentfields = self._get_permitted_parentfields()
+			if not permitted_parentfields:
+				self._raise_permission_error()
+
 			self.query = self.query.inner_join(self.permission_table).on(
-				self.table.parent == self.permission_table.name
+				(self.table.parent == self.permission_table.name)
+				& (self.table.parenttype == self.parent_doctype)
+				& (self.table.parentfield.isin(permitted_parentfields))
 			)
 
 		role_permissions = frappe.permissions.get_role_permissions(self.permission_doctype, user=self.user)
