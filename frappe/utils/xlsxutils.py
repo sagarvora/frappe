@@ -27,34 +27,22 @@ ILLEGAL_CHARACTERS_RE = re.compile(
 )
 
 
-class StyleRef:
+class StyleRef(dict):
 	"""
-	Immutable, hashable reference to a style dict.
+	Immutable, hashable style dict.
 
 	Enables automatic deduplication of identical styles via interning.
 	Two StyleRefs with the same content are equal and share the same hash.
 	"""
 
-	__slots__ = ("_hash", "dict")
+	__slots__ = ("_hash",)
 
-	def __init__(self, style: dict):
-		self.dict: dict = style
-		self._hash: int = hash(frozenset(style.items()))
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self._hash: int = hash(frozenset(self.items()))
 
 	def __hash__(self) -> int:
 		return self._hash
-
-	def __eq__(self, other: object) -> bool:
-		if not isinstance(other, StyleRef):
-			return NotImplemented
-		# fast path: different hashes mean definitely not equal
-		if self._hash != other._hash:
-			return False
-		# same hash: compare dicts (handles collisions)
-		return self.dict == other.dict
-
-	def __repr__(self) -> str:
-		return f"StyleRef({self.dict!r})"
 
 
 ### XLSX Formatter ###
@@ -95,8 +83,8 @@ class XLSXStyleBuilder:
 	"""
 	Builder for configuring Excel cell styles with automatic deduplication.
 
-	Styles are stored as StyleRef objects (hashable, immutable wrappers around dicts).
-	Multiple styles can be stacked on the same target - they merge in order:
+	Styles are stored as StyleRef objects (hashable dict subclasses).
+	Multiple styles can be stacked on the same target — they merge in order:
 	column → row → cell (later wins on conflict).
 
 	Usage:
@@ -464,12 +452,12 @@ def make_xlsx(
 		format_obj = format_cache.get(refs)
 		if format_obj is None:
 			if len(refs) == 1:
-				merged = refs[0].dict
+				merged = refs[0]
 			else:
 				# merge all style dicts in order (later wins on conflict)
 				merged = {}
 				for ref in refs:
-					merged.update(ref.dict)
+					merged.update(ref)
 			format_obj = wb.add_format(merged)
 			format_cache[refs] = format_obj
 
