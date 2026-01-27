@@ -1,27 +1,60 @@
 # Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
 # License: MIT. See LICENSE
-import functools
+from __future__ import annotations
+
+import itertools
 import re
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from io import BytesIO
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import xlrd
 import xlsxwriter
 from openpyxl import load_workbook
 from openpyxl.workbook.child import INVALID_TITLE_REGEX
-from xlsxwriter.format import Format
 
 import frappe
-from frappe import _
 from frappe.core.utils import html2text
 from frappe.utils import cint
 from frappe.utils.html_utils import unescape_html
 
+if TYPE_CHECKING:
+	from xlsxwriter.format import Format
+
 ILLEGAL_CHARACTERS_RE = re.compile(
 	r"[\000-\010]|[\013-\014]|[\016-\037]|\uFEFF|\uFFFE|\uFFFF|[\uD800-\uDFFF]"
 )
+
+
+class StyleRef:
+	"""
+	Immutable, hashable reference to a style dict.
+
+	Enables automatic deduplication of identical styles via interning.
+	Two StyleRefs with the same content are equal and share the same hash.
+	"""
+
+	__slots__ = ("_hash", "dict")
+
+	def __init__(self, style: dict):
+		self.dict: dict = style
+		self._hash: int = hash(frozenset(style.items()))
+
+	def __hash__(self) -> int:
+		return self._hash
+
+	def __eq__(self, other: object) -> bool:
+		if not isinstance(other, StyleRef):
+			return NotImplemented
+		# fast path: different hashes mean definitely not equal
+		if self._hash != other._hash:
+			return False
+		# same hash: compare dicts (handles collisions)
+		return self.dict == other.dict
+
+	def __repr__(self) -> str:
+		return f"StyleRef({self.dict!r})"
 
 
 ### XLSX Formatter ###
@@ -59,21 +92,41 @@ class XLSXMetadata:
 
 
 class XLSXStyleBuilder:
+	"""
+	Builder for configuring Excel cell styles with automatic deduplication.
+
+	Styles are stored as StyleRef objects (hashable, immutable wrappers around dicts).
+	Multiple styles can be stacked on the same target - they merge in order:
+	column → row → cell (later wins on conflict).
+
+	Usage:
+		builder = XLSXStyleBuilder(metadata)
+
+		# pass dicts directly (auto-converted to StyleRef)
+		builder.style_column(0, {"num_format": "#,##0.00"})
+		builder.style_row(0, {"bold": True})
+
+		# or create reusable refs for performance
+		currency_fmt = builder.style({"num_format": "$#,##0.00"})
+		builder.style_column(1, currency_fmt)
+		builder.style_column(2, currency_fmt)
+
+		styles = builder.build()
+	"""
+
 	def __init__(self, metadata: XLSXMetadata):
 		self.metadata = metadata
 
-		self.styles = {}
-		self.config = {
-			"column_styles": {},
-			"row_styles": {},
-			"cell_styles": {},
-		}
+		# interned style refs: StyleRef → StyleRef (for deduplication)
+		self._style_cache: dict[StyleRef, StyleRef] = {}
+
+		# sparse maps: index → list of StyleRefs (for stacking)
+		self._column_styles: dict[int, list[StyleRef]] = {}
+		self._row_styles: dict[int, list[StyleRef]] = {}
+		self._cell_styles: dict[tuple[int, int], list[StyleRef]] = {}
 
 		self._set_defaults()
-
-		self._register_default_highlight_styles()
-		self._register_default_indent_styles()
-		self._register_default_fieldtype_formats()
+		self._register_default_styles()
 
 	### POST INIT METHODS ###
 	def _set_defaults(self):
@@ -81,90 +134,99 @@ class XLSXStyleBuilder:
 			col.get("fieldtype") == "Currency" for col in self.metadata.column_map.values()
 		)
 
-		self.currency_fields = {}
+		self.currency_fields: dict[int, dict] = {}
 
 		if self.currency_field_exists:
 			for idx, col in self.metadata.column_map.items():
 				if col.get("fieldtype") == "Currency":
 					self.currency_fields[idx] = col
 
-	### STYLE REGISTRATION ###
-	def _register_default_highlight_styles(self):
-		highlight_styles = {
-			"header": {"bold": True, "font_size": 12},
-			"total_row": {"bold": True},
-			"filter_label": {"bold": True},
-		}
+	def _register_default_styles(self):
+		# highlight styles
+		self._header_style = self.style({"bold": True, "font_size": 12})
+		self._total_row_style = self.style({"bold": True})
+		self._filter_label_style = self.style({"bold": True})
 
-		for name, style in highlight_styles.items():
-			self.register_style(name, style)
+		# indent styles
+		self._indent_styles: dict[int, StyleRef] = {}
+		if self.metadata.max_indent_level:
+			for indent in range(self.metadata.max_indent_level + 1):
+				self._indent_styles[indent] = self.style({"align": "left", "indent": indent * 2})
 
-	def _register_default_indent_styles(self):
-		if not self.metadata.max_indent_level:
-			return
+		# fieldtype format styles
+		self._float_format = self.style({"num_format": self.get_number_format("Float")})
+		self._percent_format = self.style({"num_format": self.get_number_format("Percent")})
+		self._date_format = self.style({"num_format": self.get_date_format()})
+		self._time_format = self.style({"num_format": self.get_time_format()})
+		self._datetime_format = self.style({"num_format": self.get_datetime_format()})
 
-		for indent in range(self.metadata.max_indent_level + 1):
-			self.register_style(self.indent_style_name(indent), {"align": "left", "indent": indent * 2})
+		# currency format cache
+		self._currency_formats: dict[str, StyleRef] = {}
 
-	def _register_default_fieldtype_formats(self):
-		map = {
-			"float_format": self.get_number_format("Float"),
-			"percent_format": self.get_number_format("Percent"),
-			"date_format": self.get_date_format(),
-			"time_format": self.get_time_format(),
-			"datetime_format": self.get_datetime_format(),
-		}
-
-		for style_name, format in map.items():
-			self.register_style(style_name, {"num_format": format})
-
-	def register_currency_format(self, currency: str):
-		if not currency:
-			return self
-
-		style_name = self.get_currency_style_name(currency)
-
-		# format registered already
-		if self.styles.get(style_name):
-			return self
-
-		number_format = self.get_number_format("Currency", currency)
-		self.register_style(style_name, {"num_format": number_format})
-
-		return self
-
-	def register_style(self, name: str, style: dict):
+	### STYLE CREATION ###
+	def style(self, style_dict: dict) -> StyleRef:
 		"""
-		Register a named style for reuse across multiple cells/rows/columns.
+		Create or return an interned StyleRef for the given style dict.
 
-		Args:
-			name: Unique name for this style
-			style: Dictionary of style properties
+		Identical dicts return the same StyleRef instance.
 		"""
-		self.styles[name] = style
-		return self
+		# create ref first to compute hash, then use for cache lookup
+		ref = StyleRef(style_dict)
+		if existing := self._style_cache.get(ref):
+			return existing
+
+		self._style_cache[ref] = ref
+		return ref
+
+	def _normalize(self, style: dict | StyleRef) -> StyleRef:
+		"""Convert dict to StyleRef if needed."""
+		if isinstance(style, StyleRef):
+			return style
+
+		return self.style(style)
 
 	### STYLE APPLICATION ###
-	def style_column(self, col_idx: int, style_name: str):
-		self.config["column_styles"][col_idx] = style_name
+	def style_column(self, col_idx: int, style: dict | StyleRef):
+		"""Apply a style to an entire column. Stacks with existing styles."""
+		if col_idx not in self._column_styles:
+			self._column_styles[col_idx] = []
+
+		self._column_styles[col_idx].append(self._normalize(style))
 		return self
 
-	def style_row(self, row_idx: int, style_name: str):
-		self.config["row_styles"][row_idx] = style_name
+	def style_row(self, row_idx: int, style: dict | StyleRef):
+		"""Apply a style to an entire row. Stacks with existing styles."""
+		if row_idx not in self._row_styles:
+			self._row_styles[row_idx] = []
+
+		self._row_styles[row_idx].append(self._normalize(style))
 		return self
 
-	def style_cell(self, row_idx: int, col_idx: int, style_name: str):
-		self.config["cell_styles"][(row_idx, col_idx)] = style_name
+	def style_cell(self, row_idx: int, col_idx: int, style: dict | StyleRef):
+		"""Apply a style to a specific cell. Stacks with existing styles."""
+		cell_key = (row_idx, col_idx)
+		if cell_key not in self._cell_styles:
+			self._cell_styles[cell_key] = []
+
+		self._cell_styles[cell_key].append(self._normalize(style))
 		return self
 
-	def build(self) -> frappe._dict:
+	def build(self) -> dict:
+		"""
+		Build the final style configuration for make_xlsx.
+
+		Returns sparse maps with StyleRef lists. make_xlsx handles
+		merging and Format object creation.
+		"""
 		return {
-			**self.config,
-			"mapping": self.styles,
+			"column_styles": self._column_styles,
+			"row_styles": self._row_styles,
+			"cell_styles": self._cell_styles,
 		}
 
-	### Utility Methods ###
+	### UTILITY METHODS ###
 	def apply_default_styles(self, currency_formatting: bool = False, currency: str | dict | None = None):
+		"""Apply standard styles: header, filters, total row, indentation, fieldtype formats."""
 		self.style_header()
 
 		if self.metadata.include_filters:
@@ -181,40 +243,39 @@ class XLSXStyleBuilder:
 		return self
 
 	def style_header(self):
-		return self.style_row(self.metadata.header_index, "header")
+		return self.style_row(self.metadata.header_index, self._header_style)
 
 	def style_filters(self):
 		LABEL_COLUMN_INDEX = 0
-
 		for row_idx in range(self.metadata.header_index):
-			self.style_cell(row_idx, LABEL_COLUMN_INDEX, "filter_label")
-
+			self.style_cell(row_idx, LABEL_COLUMN_INDEX, self._filter_label_style)
 		return self
 
 	def apply_indentations(self, column: int):
 		for idx, row in self.metadata.row_map.items():
 			if isinstance(row, dict) and "indent" in row:
-				self.style_cell(idx, column, self.indent_style_name(row["indent"]))
-
+				indent = row["indent"]
+				if style := self._indent_styles.get(indent):
+					self.style_cell(idx, column, style)
 		return self
 
 	def style_total_row(self):
-		return self.style_row(self.metadata.last_row_index, "total_row")
+		return self.style_row(self.metadata.last_row_index, self._total_row_style)
 
 	def apply_default_fieldtype_formats(
 		self, *, currency_formatting: bool = False, currency: str | dict | None = None
 	):
-		default_fieldtype_styles = {
-			"Float": "float_format",
-			"Percent": "percent_format",
-			"Date": "date_format",
-			"Time": "time_format",
-			"Datetime": "datetime_format",
+		fieldtype_styles = {
+			"Float": self._float_format,
+			"Percent": self._percent_format,
+			"Date": self._date_format,
+			"Time": self._time_format,
+			"Datetime": self._datetime_format,
 		}
 
 		for idx, col in self.metadata.column_map.items():
-			if style_name := default_fieldtype_styles.get(col.get("fieldtype")):
-				self.style_column(idx, style_name)
+			if style := fieldtype_styles.get(col.get("fieldtype")):
+				self.style_column(idx, style)
 
 		if currency_formatting:
 			self.apply_currency_fieldtype_formats(currency)
@@ -225,22 +286,23 @@ class XLSXStyleBuilder:
 		if not self.currency_field_exists:
 			return self
 
-		@functools.cache
-		def _register(currency: str) -> str:
-			return self.register_currency_format(currency).get_currency_style_name(currency)
+		def _get_currency_style(currency_code: str) -> StyleRef:
+			if currency_code not in self._currency_formats:
+				num_format = self.get_number_format("Currency", currency_code)
+				self._currency_formats[currency_code] = self.style({"num_format": num_format})
+			return self._currency_formats[currency_code]
 
-		# if single currency is provided, use it for all currency fields
+		# single currency for all currency fields
 		if isinstance(currency, str):
-			style_name = _register(currency)
+			style = _get_currency_style(currency)
+			for idx in self.currency_fields:
+				self.style_column(idx, style)
 
-			for idx in self.currency_fields.keys():
-				self.style_column(idx, style_name)
-
-		# if currency mapping is provided, use it for respective fields
+		# currency mapping per field
 		elif isinstance(currency, dict):
 			for fieldname, code in currency.items():
 				if idx := self.metadata.get_column_index(fieldname):
-					self.style_column(idx, _register(code))
+					self.style_column(idx, _get_currency_style(code))
 
 		# currency per row based on metadata
 		else:
@@ -251,9 +313,8 @@ class XLSXStyleBuilder:
 					continue
 
 				for col_idx, col in self.currency_fields.items():
-					currency = self.get_field_currency(col, row) or default_currency
-
-					self.style_cell(row_idx, col_idx, _register(currency))
+					curr = self.get_field_currency(col, row) or default_currency
+					self.style_cell(row_idx, col_idx, _get_currency_style(curr))
 
 		return self
 
@@ -263,23 +324,21 @@ class XLSXStyleBuilder:
 		options = df.get("options")
 
 		if not (options and fieldname and doc):
-			return
+			return None
 
 		if ":" in options:
 			parts = options.split(":")
 			if len(parts) == 3 and (docname := doc.get(parts[1])):
 				return XLSXStyleBuilder._get_currency(parts[0], docname, parts[2])
-			else:
-				return
-		else:
-			return doc.get(options)
+			return None
+		return doc.get(options)
 
 	@staticmethod
 	@frappe.request_cache
 	def _get_currency(doctype: str, docname: str, fieldname: str) -> str | None:
 		return frappe.get_value(doctype, docname, fieldname)
 
-	### Format Getters ###
+	### FORMAT GETTERS ###
 	@staticmethod
 	def get_date_format() -> str:
 		return frappe.get_system_settings("date_format")
@@ -311,7 +370,7 @@ class XLSXStyleBuilder:
 			currency_symbol, symbol_on_right = XLSXStyleBuilder._get_currency_symbol_info(currency)
 			return XLSXStyleBuilder._get_currency_format(format_str, currency_symbol, symbol_on_right)
 
-		elif fieldtype in ("Float", "Percent"):
+		if fieldtype in ("Float", "Percent"):
 			precision = cint(frappe.db.get_default("float_precision")) or precision
 			format_str = XLSXStyleBuilder._build_number_format(thousands_sep, decimal_sep, precision)
 			return f'{format_str}"%" ' if fieldtype == "Percent" else format_str
@@ -322,7 +381,6 @@ class XLSXStyleBuilder:
 	def _build_number_format(thousands_sep: str, decimal_sep: str, precision: int = 0) -> str:
 		integer_part = "#,##0" if thousands_sep else "#0"
 		decimal_part = (decimal_sep + "0" * precision) if precision > 0 else ""
-
 		return f"{integer_part}{decimal_part}"
 
 	@staticmethod
@@ -331,7 +389,6 @@ class XLSXStyleBuilder:
 			return "", False
 
 		symbol, on_right = frappe.db.get_value("Currency", currency, ["symbol", "symbol_on_right"])
-
 		return frappe._(symbol or currency), bool(on_right)
 
 	@staticmethod
@@ -347,14 +404,6 @@ class XLSXStyleBuilder:
 			return f'{format_string}" {currency_symbol}";-{format_string}" {currency_symbol}"'
 
 		return f'"{currency_symbol} "{format_string};"{currency_symbol} "-{format_string}'
-
-	@staticmethod
-	def get_currency_style_name(currency: str) -> str:
-		return f"{currency.lower()}_currency_format"
-
-	@staticmethod
-	def indent_style_name(indent: int) -> str:
-		return f"indent_{indent}"
 
 
 ### Excel Creation ###
@@ -373,11 +422,10 @@ def make_xlsx(
 		sheet_name: Name of the Excel sheet
 		wb: Existing workbook to add sheet to. If None, creates new workbook
 		column_widths: List of column widths in Excel units. If None, auto-sized
-		styles: Dictionary defining styles for cells, rows, and columns
-			- mapping: dict of style name to style properties
-			- column_styles: dict of column index to style name
-			- row_styles: dict of row index to style name
-			- cell_styles: dict of (row index, column index) to style name
+		styles: Dictionary from XLSXStyleBuilder.build() containing:
+			- column_styles: dict[int, list[StyleRef]]
+			- row_styles: dict[int, list[StyleRef]]
+			- cell_styles: dict[tuple[int, int], list[StyleRef]]
 
 	Returns:
 		BytesIO: object containing the Excel file data
@@ -385,68 +433,76 @@ def make_xlsx(
 	column_widths = column_widths or []
 	styles = styles or {}
 
-	# creating workbook
 	xlsx_file = BytesIO()
-	created_wb = wb is None  # to know to close it later
+	created_wb = wb is None
 
 	if created_wb:
 		wb = xlsxwriter.Workbook(xlsx_file, {"in_memory": True})
 
-	# sanitize sheet name
 	sheet_name_sanitized = INVALID_TITLE_REGEX.sub(" ", sheet_name)
 	ws = wb.add_worksheet(sheet_name_sanitized[:31])
 
-	# set column widths
 	for i, column_width in enumerate(column_widths):
 		if column_width:
 			ws.set_column(i, i, column_width)
 
-	# handle styles
-	style_map: dict = styles.get("mapping") or {}
-	col_styles: dict[int, str] = styles.get("column_styles") or {}
-	row_styles: dict[int, str] = styles.get("row_styles") or {}
-	cell_styles: dict[tuple[int, int], str] = styles.get("cell_styles") or {}
-	format_map: dict[tuple[str, ...], Format] = {}
+	col_styles: dict[int, list[StyleRef]] = styles.get("column_styles") or {}
+	row_styles: dict[int, list[StyleRef]] = styles.get("row_styles") or {}
+	cell_styles: dict[tuple[int, int], list[StyleRef]] = styles.get("cell_styles") or {}
 
 	styling_enabled = bool(col_styles or row_styles or cell_styles)
 
 	if not styling_enabled:
 		ws.set_row(0, cell_format=wb.add_format({"bold": True}))
 
-	def get_cell_style(r: int, c: int):
-		key = tuple(
-			s for s in (col_styles.get(c), row_styles.get(r), cell_styles.get((r, c))) if s is not None
-		)
-		if not key:
-			return
+	# format cache: tuple of StyleRefs → Format object
+	# this avoids creating duplicate Format objects for identical style combinations
+	format_cache: dict[tuple[StyleRef, ...], Format] = {}
 
-		format = format_map.get(key)
-		if format is None:
-			if len(key) == 1:
-				style_dict = style_map.get(key[0]) or {}
+	def get_format(refs: tuple[StyleRef, ...]) -> Format:
+		"""Get or create a Format for a tuple of StyleRefs."""
+		format_obj = format_cache.get(refs)
+		if format_obj is None:
+			if len(refs) == 1:
+				merged = refs[0].dict
 			else:
-				style_dict = {}
-				for style_name in key:
-					# priority: cell > row > column
-					style_dict.update(style_map.get(style_name) or {})
+				# merge all style dicts in order (later wins on conflict)
+				merged = {}
+				for ref in refs:
+					merged.update(ref.dict)
+			format_obj = wb.add_format(merged)
+			format_cache[refs] = format_obj
 
-			format = wb.add_format(style_dict)
-			format_map[key] = format
+		return format_obj
 
-		return format
-
+	# local references for hot loop
+	write = ws.write
+	illegal_chars_sub = ILLEGAL_CHARACTERS_RE.sub
 	handle_html_content = sheet_name not in {"Data Import Template", "Data Export"}
+	col_styles_get = col_styles.get
+	row_styles_get = row_styles.get
+	cell_styles_get = cell_styles.get
+	itertools_chain = itertools.chain
 
 	for row_idx, row in enumerate(data):
+		row_refs = row_styles_get(row_idx)
+
 		for col_idx, value in enumerate(row):
 			if isinstance(value, str):
 				if handle_html_content:
 					value = handle_html(value)
+				value = illegal_chars_sub("", value)
 
-				value = ILLEGAL_CHARACTERS_RE.sub("", value)
+			cell_format = None
+			if styling_enabled:
+				col_refs = col_styles_get(col_idx)
+				cell_refs = cell_styles_get((row_idx, col_idx))
 
-			cell_format = get_cell_style(row_idx, col_idx) if styling_enabled else None
-			ws.write(row_idx, col_idx, value, cell_format)
+				key = tuple(itertools_chain(col_refs or (), row_refs or (), cell_refs or ()))
+				if key:
+					cell_format = get_format(key)
+
+			write(row_idx, col_idx, value, cell_format)
 
 	if created_wb:
 		wb.close()
