@@ -268,7 +268,7 @@ class TestUser(IntegrationTestCase):
 
 		user = frappe.copy_doc(self.globalTestRecords["User"][1])
 		user.email = "_test@example.com"
-		user.insert()
+		user.insert(set_name=user.email)
 
 		frappe.get_doc({"doctype": "ToDo", "description": "_Test"}).insert()
 
@@ -498,9 +498,9 @@ class TestUser(IntegrationTestCase):
 				"new_password": "Eastern_43A1W",
 				"roles": [{"doctype": "Has Role", "parentfield": "roles", "role": "System Manager"}],
 			}
-		).insert(ignore_permissions=True, ignore_if_duplicate=True)
+		).insert(ignore_permissions=True, ignore_if_duplicate=True, set_name=old_name)
 
-		frappe.rename_doc("User", user.name, new_name)
+		frappe.rename_doc("User", user.name, new_name, force=True)
 		self.assertTrue(frappe.db.exists("Notification Settings", new_name))
 
 		frappe.delete_doc("User", new_name)
@@ -510,7 +510,7 @@ class TestUser(IntegrationTestCase):
 		new_name = "test_user_rename_owner_new@example.com"
 		user = frappe.get_doc(
 			{"doctype": "User", "email": old_name, "first_name": "_Test", "send_welcome_email": 0}
-		).insert(ignore_permissions=True, ignore_if_duplicate=True)
+		).insert(ignore_permissions=True, ignore_if_duplicate=True, set_name=old_name)
 
 		todo = frappe.get_doc({"doctype": "ToDo", "description": "owned by a renamed user"}).insert()
 		frappe.db.set_value(
@@ -518,7 +518,7 @@ class TestUser(IntegrationTestCase):
 		)
 
 		with patch("frappe.enqueue") as enqueue:
-			frappe.rename_doc("User", user.name, new_name)
+			frappe.rename_doc("User", user.name, new_name, force=True)
 
 		enqueue.assert_any_call(
 			"frappe.core.doctype.user.user.rewrite_owner_fields",
@@ -541,7 +541,7 @@ class TestUser(IntegrationTestCase):
 		new_name = "test_user_rename_reused_new@example.com"
 		frappe.get_doc(
 			{"doctype": "User", "email": old_name, "first_name": "_Test", "send_welcome_email": 0}
-		).insert(ignore_permissions=True, ignore_if_duplicate=True)
+		).insert(ignore_permissions=True, ignore_if_duplicate=True, set_name=old_name)
 		taken_at = frappe.db.get_value("User", old_name, "creation")
 
 		before = frappe.get_doc({"doctype": "ToDo", "description": "written before the rename"}).insert()
@@ -573,12 +573,12 @@ class TestUser(IntegrationTestCase):
 		for email in (freed, renamed, other):
 			frappe.get_doc(
 				{"doctype": "User", "email": email, "first_name": "_Test", "send_welcome_email": 0}
-			).insert(ignore_permissions=True, ignore_if_duplicate=True)
+			).insert(ignore_permissions=True, ignore_if_duplicate=True, set_name=email)
 
 		unrelated = "test_user_rename_pending_unrelated@example.com"
 		frappe.get_doc(
 			{"doctype": "User", "email": unrelated, "first_name": "_Test", "send_welcome_email": 0}
-		).insert(ignore_permissions=True, ignore_if_duplicate=True)
+		).insert(ignore_permissions=True, ignore_if_duplicate=True, set_name=unrelated)
 
 		def pending_job(method, old_name, new_name):
 			return SimpleNamespace(
@@ -598,18 +598,20 @@ class TestUser(IntegrationTestCase):
 			patch("frappe.core.doctype.user.user.get_running_jobs_in_queue", return_value=[]),
 		):
 			with self.assertRaisesRegex(frappe.ValidationError, "still being applied"):
-				frappe.rename_doc("User", renamed, "test_user_rename_pending_new@example.com")
+				frappe.rename_doc("User", renamed, "test_user_rename_pending_new@example.com", force=True)
 
 			with self.assertRaisesRegex(frappe.ValidationError, "still being applied"):
-				frappe.rename_doc("User", other, renamed, merge=True)
+				frappe.rename_doc("User", other, renamed, merge=True, force=True)
 
 			with self.assertRaisesRegex(frappe.ValidationError, "still being applied"):
-				frappe.rename_doc("User", freed, "test_user_rename_pending_freed_new@example.com")
+				frappe.rename_doc("User", freed, "test_user_rename_pending_freed_new@example.com", force=True)
 
 			with self.assertRaisesRegex(frappe.ValidationError, "still being applied"):
 				frappe.delete_doc("User", freed)
 
-			frappe.rename_doc("User", unrelated, "test_user_rename_pending_unrelated_new@example.com")
+			frappe.rename_doc(
+				"User", unrelated, "test_user_rename_pending_unrelated_new@example.com", force=True
+			)
 
 	def test_user_rename_updates_private_workspace(self):
 		old_name = "test_user_rename_ws@example.com"
@@ -631,7 +633,7 @@ class TestUser(IntegrationTestCase):
 				"new_password": "Eastern_43A1W",
 				"roles": [{"doctype": "Has Role", "parentfield": "roles", "role": "System Manager"}],
 			}
-		).insert(ignore_permissions=True, ignore_if_duplicate=True)
+		).insert(ignore_permissions=True, ignore_if_duplicate=True, set_name=old_name)
 
 		frappe.get_doc(
 			{
@@ -642,7 +644,7 @@ class TestUser(IntegrationTestCase):
 				"new_password": "Eastern_43A1W",
 				"roles": [{"doctype": "Has Role", "parentfield": "roles", "role": "System Manager"}],
 			}
-		).insert(ignore_permissions=True, ignore_if_duplicate=True)
+		).insert(ignore_permissions=True, ignore_if_duplicate=True, set_name=actor_name)
 
 		frappe.get_doc(
 			{
@@ -659,7 +661,7 @@ class TestUser(IntegrationTestCase):
 		).insert(ignore_permissions=True)
 
 		with self.set_user(actor_name):
-			frappe.rename_doc("User", old_name, new_name)
+			frappe.rename_doc("User", old_name, new_name, force=True)
 
 		new_workspace = f"Test Rename Workspace-{new_name}"
 		self.assertTrue(frappe.db.exists("Workspace", new_workspace))
@@ -685,9 +687,9 @@ class TestUser(IntegrationTestCase):
 			sign_up(random_user, random_user_name, "/welcome"),
 			(1, "Please check your email for verification"),
 		)
-		self.assertEqual(
-			frappe.cache.hget("redirect_after_login", random_user), sanitize_redirect("/welcome")
-		)
+		user_id = get_user_by_email(random_user)
+		self.assertNotEqual(user_id, random_user)
+		self.assertEqual(frappe.cache.hget("redirect_after_login", user_id), sanitize_redirect("/welcome"))
 
 		# re-register
 		self.assertTupleEqual(
@@ -696,7 +698,7 @@ class TestUser(IntegrationTestCase):
 		)
 
 		# disabled user
-		user = frappe.get_doc("User", random_user)
+		user = frappe.get_doc("User", user_id)
 		user.enabled = 0
 		user.save()
 
@@ -1117,7 +1119,7 @@ class TestUserEmailHelpers(IntegrationTestCase):
 				user.save()
 
 		with test_user(roles=[]) as user, self.assertRaises(frappe.ValidationError):
-			frappe.rename_doc("User", user.name, f"{user.name}.invalid")
+			frappe.rename_doc("User", user.name, f"{user.name}.invalid", force=True)
 
 	def test_email_patch_moves_administrators_email_off_a_users_id(self):
 		from frappe.patches.v16_0.set_user_email_from_name import execute
@@ -1142,6 +1144,39 @@ class TestUserEmailHelpers(IntegrationTestCase):
 		execute()
 		self.assertEqual(frappe.db.get_value("User", "Administrator", "email"), "admin@frappe.invalid")
 		self.assertEqual(frappe.db.get_value("User", "admin@example.com", "email"), "admin@example.com")
+
+	def test_new_users_get_a_random_id(self):
+		with test_user(roles=[], generated_id=True, email="_test_random_id@example.com") as user:
+			self.assertNotIn("@", user.name)
+			self.assertEqual(user.email, "_test_random_id@example.com")
+
+			user.reload()
+			user.first_name = "Renamed"
+			user.save()
+			self.assertEqual(user.email, "_test_random_id@example.com")
+
+	def test_email_cant_be_another_users_id(self):
+		with (
+			test_user(roles=[], email="_test_old_id@example.com") as old,
+			test_user(roles=[], generated_id=True) as new,
+		):
+			old.email = "_test_new_address@example.com"
+			old.save()
+
+			new.reload()
+			new.email = old.name
+			self.assertRaises(frappe.ValidationError, new.save)
+
+	def test_users_are_found_by_email(self):
+		from frappe.core.doctype.user.user import user_query
+
+		with (
+			test_user(roles=["Desk User"]) as searcher,
+			test_user(roles=["Desk User"], generated_id=True, email="_test_find_me@example.com") as user,
+			self.set_user(searcher.name),
+		):
+			found = user_query("User", "_test_find_me", "name", 0, 20, {})
+			self.assertIn(user.name, [row[0] for row in found])
 
 	def test_get_user_by_email(self):
 		with test_user(roles=[], generated_id=True) as user:
