@@ -1155,6 +1155,12 @@ class TestUserEmailHelpers(IntegrationTestCase):
 			user.save()
 			self.assertEqual(user.email, "_test_random_id@example.com")
 
+	def test_only_system_managers_change_emails(self):
+		with test_user(roles=["Desk User"], generated_id=True) as user, self.set_user(user.name):
+			user = frappe.get_doc("User", user.name)
+			user.email = "_test_changed_myself@example.com"
+			self.assertRaises(frappe.PermissionError, user.save)
+
 	def test_email_cant_be_another_users_id(self):
 		with (
 			test_user(roles=[], email="_test_old_id@example.com") as old,
