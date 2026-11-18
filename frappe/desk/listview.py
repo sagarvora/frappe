@@ -47,10 +47,13 @@ def get_group_by_count(doctype: str, current_filters: str | list, field: str) ->
 			ignore_permissions=False,
 		)
 
+		show_title = frappe.get_meta("User").show_title_field_in_link
 		return (
 			frappe.qb.from_(ToDo)
 			.from_(User)
-			.select(ToDo.allocated_to.as_("name"), count)
+			.select(
+				ToDo.allocated_to.as_("name"), *([User.full_name.as_("title")] if show_title else []), count
+			)
 			.where(
 				(ToDo.status != "Cancelled")
 				& (ToDo.allocated_to == User.name)
@@ -58,7 +61,7 @@ def get_group_by_count(doctype: str, current_filters: str | list, field: str) ->
 				& (ToDo.reference_type == doctype)
 				& (ToDo.reference_name.isin(SubQuery(filtered_records)))
 			)
-			.groupby(ToDo.allocated_to)
+			.groupby(ToDo.allocated_to, *([User.full_name] if show_title else []))
 			.orderby(count, order=Order.desc)
 			.limit(50)
 			.run(as_dict=True)
@@ -94,11 +97,16 @@ def get_group_by_count(doctype: str, current_filters: str | list, field: str) ->
 		data = data[0:50]
 
 	# Add in title if it's a link field and `show_title_field_in_link` is set
-	if (field_meta := meta.get_field(field)) and field_meta.fieldtype == "Link":
-		link_meta = frappe.get_meta(field_meta.options)
-		if link_meta.show_title_field_in_link:
-			title_field = link_meta.get_title_field()
-			for item in data:
-				item.title = frappe.get_value(field_meta.options, item.name, title_field)
+	if field in ("owner", "modified_by"):
+		link_doctype = "User"
+	elif (field_meta := meta.get_field(field)) and field_meta.fieldtype == "Link":
+		link_doctype = field_meta.options
+	else:
+		link_doctype = None
+
+	if link_doctype and (link_meta := frappe.get_meta(link_doctype)).show_title_field_in_link:
+		title_field = link_meta.get_title_field()
+		for item in data:
+			item.title = frappe.get_value(link_doctype, item.name, title_field)
 
 	return data

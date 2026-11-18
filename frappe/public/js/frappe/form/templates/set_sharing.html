@@ -42,7 +42,7 @@ var all_perms = standard_perms.concat(custom_perms);
 		var s = shared[i]; %}
 		{% if(s && !s.everyone) { %}
 		<div class="shared-user" data-user="{%= s.user %}" data-name="{%= s.name %}" style="display: grid; grid-template-columns: 2fr repeat({%= all_perms.length %}, 1fr); gap: 8px; align-items: center;">
-			<div>{%= s.user %}</div>
+			<div>{%= frappe.user.full_name(s.user) %}</div>
 			{% for (var j=0; j < all_perms.length; j++) {
 				var perm = all_perms[j];
 				var is_disabled = perm.disable_check && !frm.perm[0][perm.name]; %}
@@ -50,7 +50,7 @@ var all_perms = standard_perms.concat(custom_perms);
 				<input type="checkbox" name="{%= perm.name %}"
 					{% if(cint(s[perm.name])) { %}checked{% } %}
 					{% if (is_disabled) { %}disabled="disabled"{% } %}
-					aria-label="{%= frappe.utils.escape_html(__("{0} for {1}", [perm.label, s.user])) %}"
+					aria-label="{%= frappe.utils.escape_html(__("{0} for {1}", [perm.label, frappe.user.full_name(s.user)])) %}"
 					class="edit-share">
 			</div>
 			{% } %}
