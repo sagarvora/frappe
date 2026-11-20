@@ -366,6 +366,7 @@ class User(Document):
 			"frappe.core.doctype.user.user.create_contact",
 			user=self,
 			ignore_mandatory=True,
+			email_changed=self.has_value_changed("email"),
 			now=now,
 			enqueue_after_commit=True,
 		)
@@ -1687,7 +1688,7 @@ def get_module_profile(module_profile: str):
 	return module_profile.get("block_modules")
 
 
-def create_contact(user, ignore_links=False, ignore_mandatory=False):
+def create_contact(user, ignore_links=False, ignore_mandatory=False, email_changed=False):
 	if user.name in ["Administrator", "Guest"]:
 		return
 
@@ -1727,10 +1728,11 @@ def create_contact(user, ignore_links=False, ignore_mandatory=False):
 			contact.gender = user.gender
 			contact.user = user.name
 
-			if user.email and (contact.email_id or "").lower() != user.email:
+			emails = {(row.email_id or "").lower() for row in contact.email_ids}
+			if user.email and (email_changed or user.email not in emails):
 				for row in contact.email_ids:
 					row.is_primary = (row.email_id or "").lower() == user.email
-				if not any(row.is_primary for row in contact.email_ids):
+				if user.email not in emails:
 					contact.add_email(user.email, is_primary=True)
 
 			# Add mobile number if phone does not exists in contact
