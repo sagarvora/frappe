@@ -1184,6 +1184,22 @@ class TestUserEmailHelpers(IntegrationTestCase):
 			self.assertEqual({row.email_id: row.is_primary for row in emails}, {old_email: 0, user.email: 1})
 			self.assertEqual(get_user_contacts(user.name), [contact.name])
 
+	def test_contact_keeps_its_primary_email_until_the_users_email_changes(self):
+		with test_user(roles=[], generated_id=True) as user:
+			contact = frappe.get_doc("Contact", {"user": user.name})
+			contact.add_email("_test_billing@example.com")
+			for row in contact.email_ids:
+				row.is_primary = row.email_id == "_test_billing@example.com"
+			contact.save()
+
+			create_contact(user)
+			self.assertEqual(
+				frappe.db.get_value("Contact", contact.name, "email_id"), "_test_billing@example.com"
+			)
+
+			create_contact(user, email_changed=True)
+			self.assertEqual(frappe.db.get_value("Contact", contact.name, "email_id"), user.email)
+
 	def test_contact_of_another_user_is_left_alone(self):
 		with test_user(roles=[]) as owner, test_user(roles=[]) as user:
 			contact = frappe.get_doc("Contact", {"user": owner.name})
