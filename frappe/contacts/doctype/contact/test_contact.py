@@ -29,7 +29,7 @@ class TestContact(IntegrationTestCase):
 		contact = frappe.get_doc(
 			doctype="Contact",
 			first_name="_Test Admin Mail",
-			email_ids=[{"email_id": admin_email.upper(), "is_primary": 1}],
+			email_ids=[{"email_id": admin_email, "is_primary": 1}],
 		).insert()
 		self.assertFalse(contact.user)
 
